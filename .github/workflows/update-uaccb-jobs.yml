@@ -1,0 +1,90 @@
+name: Update UACCB Jobs RSS
+on:
+  schedule:
+    - cron: '0 14 * * 1-5'
+jobs:
+  update-feed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install requests pytz
+      - name: Generate RSS feed
+        run: |
+          python <<'PY'
+          import requests, datetime, pytz, email.utils
+          import xml.etree.ElementTree as ET
+          # Fetch JSON data
+          resp = requests.get('https://uaccb.lightcastcc.com/api/cc-api/postings/uaccb', timeout=60)
+          data = resp.json()
+          postings = data.get('postings', data) if isinstance(data, dict) else data
+          def parse_date(s):
+              try:
+                  return datetime.datetime.fromisoformat(s.replace('Z','+00:00'))
+              except Exception:
+                  try:
+                      return datetime.datetime.strptime(s, '%b %d, %Y')
+                  except Exception:
+                      return datetime.datetime.utcnow()
+          postings.sort(key=lambda p: parse_date(p.get('publishedOn') or p.get('published_on') or ''), reverse=True)
+          posts = postings[:7]
+          central = pytz.timezone('America/Chicago')
+          now = datetime.datetime.now(tz=central)
+          last_build = email.utils.format_datetime(now)
+          rss = ET.Element('rss', attrib={'version':'2.0', 'xmlns:atom':'http://www.w3.org/2005/Atom'})
+          channel = ET.SubElement(rss, 'channel')
+          ET.SubElement(channel, 'title').text = 'UACCB Career Coach — Latest Jobs'
+          ET.SubElement(channel, 'link').text = 'https://uaccb.lightcastcc.com/work-opportunities?radius=40 miles&region=Batesville Campus'
+          ET.SubElement(channel, 'description').text = 'The seven most recent job postings near UACCB (Career Coach).'
+          ET.SubElement(channel, 'language').text = 'en-US'
+          ET.SubElement(channel, 'lastBuildDate').text = last_build
+          ET.SubElement(channel, 'ttl').text = '30'
+          ET.SubElement(channel, '{http://www.w3.org/2005/Atom}link', attrib={'rel':'self','type':'application/rss+xml','href':'https://raw.githubusercontent.com/scott-phillips-UACCB/career-coach/main/uaccb-jobs.xml'})
+          for post in posts:
+              item = ET.SubElement(channel, 'item')
+              title = post.get('title') or ''
+              ET.SubElement(item, 'title').text = title
+              posting_id = post.get('id') or post.get('posting_id') or post.get('id')
+              apply_url = ''
+              if 'application' in post and post['application']:
+                  apply_url = post['application'].get('link') or ''
+              link = apply_url if apply_url else f'https://uaccb.lightcastcc.com/posting/{posting_id}'
+              ET.SubElement(item, 'link').text = link
+              ET.SubElement(item, 'guid', attrib={'isPermaLink':'false'}).text = f'uaccb:{posting_id}'
+              pub = parse_date(post.get('publishedOn') or post.get('published_on') or '')
+              pub = pub.replace(tzinfo=datetime.timezone.utc).astimezone(central)
+              ET.SubElement(item, 'pubDate').text = email.utils.format_datetime(pub)
+              employer = post.get('employerName') or post.get('employer_name') or ''
+              job_type = post.get('jobType') or post.get('job_type') or ''
+              status = post.get('status') or 'Open'
+              desc = post.get('description') or ''
+              first_line = f'{employer} — {job_type} — {status}'
+              summary = first_line + '\n' + desc
+              end_on = post.get('endOn') or post.get('end_on')
+              if end_on:
+                  summary += f'\nCloses: {end_on}'
+              desc_el = ET.SubElement(item, 'description')
+              desc_el.text = f'<![CDATA[{summary}]]>'
+              if job_type:
+                  ET.SubElement(item, 'category').text = job_type
+              if employer:
+                  ET.SubElement(item, 'category').text = employer
+          xml_str = ET.tostring(rss, encoding='unicode')
+          with open('uaccb-jobs.xml', 'w', encoding='utf-8') as f:
+              f.write(xml_str)
+          PY
+      - name: Commit updated feed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet uaccb-jobs.xml; then
+            echo "No changes to commit"
+          else
+            git add uaccb-jobs.xml
+            git commit -m "chore(feed): refresh UACCB jobs RSS (automated)"
+            git push
+          fi
